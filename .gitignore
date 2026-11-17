@@ -4,3 +4,5 @@ __pycache__/
 work/
 results/*
 !results/core_reference.json
+# paper/: generated training data (never commit: images + STEP, and it must stay auditable by hash)
+data/

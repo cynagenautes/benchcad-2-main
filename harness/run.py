@@ -22,6 +22,10 @@ Providers and the key each one reads (first name that is set wins):
     xai/<id>          XAI_API_KEY, GROK_API_KEY
     openrouter/<id>   OPENROUTER_API_KEY
     opencode/<id>     OPENCODE_ZEN_API_KEY, OPENCODE_API_KEY, ZEN_API_KEY
+    maya/<id>         none needed - a local Project Maya server's Responses API at
+                      MAYA_BASE_URL (default http://127.0.0.1:8080/v1); MAYA_API_KEY
+                      if the server has one; MAYA_IDLE_S / MAYA_CALL_BUDGET_S set
+                      the local clocks (maya_settings)
     mock/oracle       none - submits the reference back (gt/gt.step, or
                       gt/gt_graph.json for ECAD), for checking the plumbing.
                       It INLINES the whole reference into its own submission;
@@ -96,7 +100,11 @@ DEFAULT_EFFORT = None
 PROVIDER_EFFORTS = {"anthropic/": EFFORTS,
                     "openai/": EFFORTS,
                     "openrouter/": ("none", "low", "medium", "high"),
-                    "gemini/": ("low", "medium", "high")}
+                    "gemini/": ("low", "medium", "high"),
+                    # Project Maya (a local server) has four thinking levels for GLM-5.3-Flash:
+                    # none, low, high, max. It would quietly round medium -> high and xhigh -> max
+                    # (serve/frontend.py EFFORT), so those are refused here instead of remapped.
+                    "maya/": ("none", "low", "high", "max")}
 OPENAI_EFFORT = {lvl: lvl for lvl in PROVIDER_EFFORTS["openai/"]}
 # What an OpenAI 400 naming the effort lowers the knob to: one step, then off.
 EFFORT_STEP_DOWN = {"max": "xhigh", "xhigh": "high"}
@@ -283,8 +291,30 @@ PROVIDERS: dict[str, Provider] = {
     "opencode/":   Provider("openai_compat",
                             ("OPENCODE_ZEN_API_KEY", "OPENCODE_API_KEY", "ZEN_API_KEY"),
                             "https://opencode.ai/zen/v1"),
+    # A local Project Maya server (github.com/mw00/project-maya), spoken through its
+    # Responses API (/v1/responses), the same protocol as openai/. The URL is
+    # MAYA_BASE_URL (default below); MAYA_API_KEY only if the server was started with one.
+    "maya/":       Provider("maya", (), "http://127.0.0.1:8080/v1"),
     "mock/":       Provider("mock"),
 }
+
+# A local server's clocks. On a consumer machine the prompt is read (prefill) at
+# a few hundred to a few thousand tokens/s and Maya sends no byte while it reads,
+# so a round-one assembly prompt of 100k+ tokens can be silent for minutes; and
+# writing runs at 15-150 tokens/s, so a long reply takes far longer than on a
+# first-party endpoint. Both are set per run and written into every record
+# (the "auth" field): a local run is not on the published clocks.
+MAYA_IDLE_S_DEFAULT = 900
+MAYA_CALL_BUDGET_S_DEFAULT = 7200
+
+
+def maya_settings(env=None) -> dict:
+    """The local server's URL, key and clocks, from the environment."""
+    env = os.environ if env is None else env
+    return {"base_url": (env.get("MAYA_BASE_URL") or PROVIDERS["maya/"].base_url).rstrip("/"),
+            "api_key": env.get("MAYA_API_KEY") or "maya-local",
+            "idle_s": float(env.get("MAYA_IDLE_S") or MAYA_IDLE_S_DEFAULT),
+            "call_budget_s": float(env.get("MAYA_CALL_BUDGET_S") or MAYA_CALL_BUDGET_S_DEFAULT)}
 
 
 def split_model(spec: str) -> tuple[str, Provider, str]:
@@ -1160,7 +1190,9 @@ def _is_openrouter(base_url: str | None) -> bool:
 
 
 def openai_responses_call(model: str, max_tokens: int, usage: list,
-                          api_key: str, effort: str | None = DEFAULT_EFFORT):
+                          api_key: str, effort: str | None = DEFAULT_EFFORT,
+                          base_url: str | None = None, prefix: str = "openai/",
+                          idle_s: float | None = None, call_budget_s: float | None = None):
     """OpenAI's own endpoint, through the Responses API, streamed.
 
     Why not /chat/completions here (measured 2026-09-17/18 on gpt-6-astra):
@@ -1183,14 +1215,15 @@ def openai_responses_call(model: str, max_tokens: int, usage: list,
     """
     import httpx
     import openai
-    effort = effort or top_effort("openai/")
-    check_effort("openai/", effort)
-    client = openai.OpenAI(api_key=api_key,
-                           timeout=httpx.Timeout(CALL_TIMEOUT_S, read=FIRST_PARTY_IDLE_S, connect=30.0),
+    effort = effort or top_effort(prefix)
+    check_effort(prefix, effort)
+    read_s = idle_s or FIRST_PARTY_IDLE_S
+    client = openai.OpenAI(api_key=api_key, base_url=base_url,
+                           timeout=httpx.Timeout(max(CALL_TIMEOUT_S, call_budget_s or 0), read=read_s, connect=30.0),
                            max_retries=0)                 # drive() owns every retry, so the log says what happened
     room = {"on": False}
-    knob = {"effort": OPENAI_EFFORT[effort]}
-    call_budget = CALL_BUDGET_S.get(effort, CALL_BUDGET_DEFAULT_S)
+    knob = {"effort": effort}
+    call_budget = call_budget_s or CALL_BUDGET_S.get(effort, CALL_BUDGET_DEFAULT_S)
     images = SentImages()
     edits = prefix_edits()
     left_out: set = set()
@@ -1891,7 +1924,10 @@ CONTEXT_TOKENS = {"claude-opus-5": 1_000_000, "claude-sonnet-5": 1_000_000,
                   "claude-haiku-5": 1_000_000, "claude-fable-5": 1_000_000,
                   "claude-haiku-4-5": 200_000, "claude-": 200_000,
                   "gpt-6": 1_050_000, "gpt-5": 400_000, "o3": 200_000, "o4": 200_000,
-                  "gemini": 1_000_000}
+                  "gemini": 1_000_000,
+                  # GLM-5.3-Flash's own window is 1M; what a Maya server holds is its
+                  # configured context (often 128K-256K on one PC): pass --context-tokens.
+                  "glm-5.3-flash": 1_048_576, "glm-maya": 1_048_576}
 DEFAULT_CONTEXT_TOKENS = 200_000
 
 
@@ -1938,6 +1974,14 @@ def build_call(spec: str, max_tokens: int, usage: list, case: Path,
             call = anthropic_call(model_id, max_tokens, usage, effort, task_budget)
         elif prov.kind == "openai_compat" and prov.base_url is None:
             call = openai_responses_call(model_id, max_tokens, usage, key, effort)
+        elif prov.kind == "maya":
+            m = maya_settings()
+            call = openai_responses_call(model_id, max_tokens, usage, m["api_key"], effort,
+                                         base_url=m["base_url"], prefix=prefix,
+                                         idle_s=m["idle_s"], call_budget_s=m["call_budget_s"])
+            call.auth = (f"maya base_url={m['base_url']} idle_s={m['idle_s']:.0f} "      # type: ignore[attr-defined]
+                         f"call_budget_s={m['call_budget_s']:.0f}"
+                         + (" key=set" if os.environ.get("MAYA_API_KEY") else ""))
         elif prov.kind == "openai_compat":
             call = openai_compat_call(model_id, max_tokens, usage, key, prov.base_url, effort)
         elif prov.kind == "gemini":
