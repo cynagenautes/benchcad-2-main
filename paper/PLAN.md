@@ -1,146 +1,148 @@
-# 論文計画: Project Maya によるGLM-5.3-Flashのローカル展開を BenchCAD 2.1 で検証する
+# 論文計画: Project Maya上のGLM-5.3-FlashのZero-shot CAD性能 (BenchCAD 2.1 Public)
 
-作成日: 2026-11-17 / 対象: BenchCAD harness 2.1 (このリポジトリ), Project Maya 1.1.65 (`c89ebef`), GLM-5.3-Flash
+更新: 2026-11-17 / 対象: BenchCAD harness 2.1, Project Maya 1.1.65 (`c89ebef`), GLM-5.3-Flash
+方針: **学習なし (zero-shot) の評価のみ。** ファインチューニングは対象外。
 
-## 0. 結論 (先に)
+## 0. 結論
 
-- **Coreなしでも論文は組める。** ただし主張の形を「リーダーボードで何点」から
-  **「同じモデルをローカルで量子化して動かすと、長いエージェント型マルチモーダル課題で何が失われるか」**
-  という**対照実験**に変える。比較は全部、同じハーネス・同じPublicケースの中で閉じる。
-- 使うデータ: **Public set (100ケース, 6タスク)** と同梱の **9 examples**。
-  Publicの規約は「評価のみ」「結果と集計スコアの公開はOK」「ケース・図面・レンダ・正解の公開はNG」。
-  BenchCAD自身はPublicのスコアを「reportableではない」としているので、論文では
-  **Coreの公表値 (`results/core_reference.json`) と横並びにしない**、と明記する。
-  投稿前に benchcad.team@gmail.com へ「Publicの集計スコアを論文に載せる」旨を一報しておくのが安全。
-- **学習について重要:** Publicの規約は *train / fine-tune / distil / RL環境化* をすべて禁止している。
-  なので学習データはBenchCADから一切作らず、**自前の合成CADデータ** (`paper/synth/`) で作った。
-  OpenAI APIでのファインチューニングは**ジョブ作成の直前 (dry run) まで**用意済み (§5)。
-- **注意:** OpenAIのFTで学習されるのはOpenAIのモデルであり、GLM-5.3-Flash (Maya) ではない。
-  また、OpenAIの出力をローカルモデルの学習に使う (蒸留) のはOpenAIの利用規約上の制約があるので、この計画ではしない。
+- **テストだけで論文になる。** 学習データは不要で、BenchCAD 2.1のPublic set (100ケース) に
+  Maya上のGLM-5.3-Flashをそのままかけ、スコア・失敗の仕方・時間・電力を報告する。
+- **書けること:** 「ローカルの量子化GLM-5.3-Flashが、図面/写真からCADを作る長いエージェント課題で
+  何点取れるか、どこで失敗するか、1ケースに何時間/何kWhかかるか」。
+- **書けないこと:** Coreスコア・公式リーダーボードとの比較。Publicのスコアは公式には「reportableではない」。
+  規約上、**結果と集計スコアの公開はOK**、ケース・図面・レンダ・正解の公開はNG。
+  論文の図にケースの画像を載せられない点に注意する (自作の図か、数値のみ)。
+- 投稿前に benchcad.team@gmail.com へ一報するのが安全。
 
-## 1. なぜ新規性があるか
+## 1. BenchCADのバージョンと固定する条件
 
-Mayaは自分の量子化 (Maya-XS/S24/S/M/L) の品質を
-**zero-shot正答率の保持率 97.7–99.2%** と **next-token一致率 83–90%** で示している (`bench/results/MAYA-*.md`)。
-これは1問1答の指標。BenchCADは
+### 1.1 バージョン
 
-- 最大60ラウンド・50万出力トークンの**長いエージェントループ** (誤差が積み重なる)
-- **画像入力** (図面・4面図・基板写真) とCadQueryコード生成
-- **LLM judgeなし**の決定的な幾何スコア (voxel IoUやトポロジーなど。定義は `docs/METRICS.md`)
+| 項目 | 値 |
+|---|---|
+| ハーネス | **2.1** (`harness_version` が全レコードに入る) |
+| コードのタグ | `v2.1` (中身の最新は `803d063`)。このブランチは `main` の `1bc7f26` + `maya/` 追加。`v2.1`→`1bc7f26` の差はテスト用ファイルの移動だけで、ハーネスとスコアラーは同一 |
+| データ | `BenchCAD/benchcad-2.0-public` revision `v2.1` (commit `1ef73a9bb7`)。`tools/run_core.sh --set public` がこのrevisionを落とす |
+| T6スコアラー | digest `c4799cc2…` (rule B) |
+| 比較できない版 | 2.0, 2.1-beta (ラウンド数・予算・思考の持ち越しが違う) |
 
-なので、「1トークンあたり1–2%の劣化が、60ラウンドで何%のスコア劣化になるか」を測れる。
-これはMaya側の資料にもBenchCAD側の公表値にもまだない。
+### 1.2 ハーネスの条件 (2.1の契約。変えない)
 
-## 2. 研究質問 (RQ)
-
-| RQ | 問い | 比較 |
+| 条件 | 値 | 備考 |
 |---|---|---|
-| RQ1 | 量子化tierでスコアはどれだけ落ちるか | Maya tier (例: S24 / S / M / L) vs **同じモデルのクラウド版** (`openrouter/z-ai/glm-5.3-flash`, 画像入力あり) |
-| RQ2 | thinking levelと思考予算の効き方 | effort `none/low/high/max` × Mayaの `thinking_budget` (既定32768) |
-| RQ3 | ローカル運用のコスト | 1ケースあたりの時間 (prefill/decode), GPU電力量 (kWh), 電気代 vs APIの$/case |
-| RQ4 (任意) | どこで失敗するか | 提出なし / 提出失敗 / ラウンド切れ / 文脈要約の発生, タスク別 (T1–T6) |
-| RQ5 (任意) | 合成データでの適応は効くか | OpenAI FTモデル (合成データ) vs 同じベースモデル, Public T1/T3で評価 |
+| ラウンド | 60 | 変えたら「smoke run」扱い |
+| 出力トークン予算 | 500,000 / ケース (思考込み) | ラウンド間でのみ判定 |
+| 1返答の上限 | 128,000 トークン | Responses経路の `max_output_tokens` |
+| 思考の持ち越し | あり | Mayaは推論を `encrypted_content` (実体はエンコードしただけ) で返し、次ラウンドに戻す |
+| 文脈の要約 | min(コンテキスト, 800k) で発火 | **`--context-tokens` にMayaの設定コンテキストを渡す** (モデルの1Mではない) |
+| 画像 | 長辺最大2000px, 毎回同じバイト | GLMのビジョンは448px・patch14 |
+| サンドボックス | Docker, ネットなし, 2GB, 1CPU, 1ブロック300秒 | `CADENV_LOCAL=1` での実行は報告用にしない |
+| 終了 | `submit` / ラウンド切れ / 予算切れ | 提出なし = 0点 |
+| 集計 | ケースごとにrep平均 → タスク平均 → タスク平均の平均 | 全repが確定するまで見出しを出さない |
 
-RQ1–RQ3が本筋で、それだけで論文1本になる。RQ5は「OpenAI APIで学習」の部分で、付録扱いが妥当。
+### 1.3 Mayaとモデルの条件 (論文の表にそのまま載せる)
 
-## 3. 実験設計
+| 条件 | 推奨値 | 理由 |
+|---|---|---|
+| effort | **max** (主), high (副) | GLM-5.3-Flashのカード: 既定かつベンチ再現の設定はmax。`maya/` は `none/low/high/max` のみ受け付ける |
+| サンプリング | temperature 1.0, top_p 0.95 | モデルカード (Mayaの既定と同じ)。**Maya-XSだけMayaの既定が0.7/min_p 0.05なので上書きする** |
+| seed | 1000 + rep | 下の§3 |
+| thinking_budget | **0 (上限なし)** | Mayaの既定32768 (XSは8192) は思考を途中で閉じる。モデル本来の挙動を測るため外し、ハーネスの128k上限に任せる |
+| loop guard | **off** | Mayaのloop guardは繰り返しを検知すると会話の書き換えやサーバー側メッセージの挿入をする。zero-shotのモデル性能ではなくなる。onは別条件 (§2のRQ3) として測る |
+| quant tier | 手元に入る最大のもの (L > M > S > S24 > XS) | 1つで主結果、余裕があれば2つ目 |
+| コンテキスト | 例 262144 | 画像の多いT2/T4/T5で足りるかはパイロットで確認 |
 
-### 3.1 アーム
+これらは `paper/eval/maya_config.py` がMayaの設定ファイル (`maya-<model>.json`) に書き込む。
 
-| アーム | `--model` | effort | rep | ケース |
-|---|---|---|---|---|
-| Maya tier A (例 S24/S) | `maya/glm-5.3-flash` | low, high | 3 | Public 100 |
-| Maya tier B (例 M/L) | `maya/glm-5.3-flash` | low, high | 3 | Public 100 |
-| クラウド参照 (同じモデル) | `openrouter/z-ai/glm-5.3-flash` | low, high | 3 | Public 100 |
-| effort sweep | `maya/...` (1 tier) | none, low, high, max | 1 | Public 100 |
-| (任意) 別系統の参照 | `openai/<id>` など | 1 level | 1 | Public 100 |
+## 2. 研究質問
 
-- **effortの揃え方:** GLMの段階は `low/high/max` (+none)。MayaはAPIで `medium→high`, `xhigh→max` に黙って丸めるので、
-  追加した `maya/` プロバイダは `medium`/`xhigh` を**拒否**する (丸めを結果に紛れ込ませないため)。
-  OpenRouter側は `none/low/medium/high` しか送れないので、**両方にある `low` と `high` で比較**する。
-- **ハーネスの契約 (60ラウンド / 50万トークン) は変えない。** 変えた場合は「smoke run」扱いで本比較に混ぜない。
-- **ローカル固有の設定は記録する:** `MAYA_IDLE_S` (既定900秒: prefill中Mayaは何も送らない),
-  `MAYA_CALL_BUDGET_S` (既定7200秒), `--context-tokens` (Mayaの設定コンテキスト。モデルの1Mではない)。
-  どれも各レコードの `auth` 欄に入る。Mayaの `thinking_budget` は思考を途中で閉じるので**交絡因子**。設定値を固定して記録する。
+| RQ | 問い | 必要な実行 |
+|---|---|---|
+| RQ1 | Maya上のGLM-5.3-Flashは各タスクで何点か | Public 100 × effort max × 3 rep |
+| RQ2 | どう失敗するか: 提出なし / 提出失敗 / ラウンド切れ / 予算切れ / 要約発生、タスク別 | RQ1のレコードから (追加実行なし) |
+| RQ3 | Mayaの運用設定 (loop guard, thinking_budget) でスコアは変わるか | 30ケース程度 × 設定違い × 1 rep |
+| RQ4 | 1ケースの時間・電力 (prefill / decode 別) | RQ1の実行中に計測 |
+| RQ5 (任意) | 同じモデルのクラウド版との差 | `openrouter/z-ai/glm-5.3-flash` (画像入力あり, 入力約$0.04・出力約$0.08 /100万トークン)。ただしOpenRouterには `max` がなく `high` までなので、`high` 同士で比較する |
 
-### 3.2 統計
+RQ1とRQ2だけで「zero-shot性能レポート」として成立する。RQ3–RQ5は余力次第。
 
-- Publicは1タスク約16–17ケース。**タスク平均の差は大きく揺れる**ので、主比較は
-  **同一ケースのペア比較** (ケースごとにrep平均→ペア差→ブートストラップ95%CI, Wilcoxon符号順位検定)。
-- BenchCAD READMEの実測: 同一ケースのばらつき0.67 (温度0.7), ペア差のSD 0.303。
-  100ペアなら標準誤差は約0.03、**差0.06前後から検出可能**。3 repで個々のケースのノイズはさらに下がる。
-- タスクごとの数字には必ず n を添える。「提出なし=0点」はハーネスの規則どおり。
+### 統計の扱い
+- Publicは1タスク約16–17ケース。タスク別の数値には必ず n と95%ブートストラップ区間を付ける。
+- BenchCAD READMEの実測では同一ケースのばらつきが大きい (0.67 @ temperature 0.7)。**最低3 rep**。
+- 条件比較 (RQ3/RQ5) は同じケース同士のペア比較で行う。
 
-### 3.3 計算量の見積り (パイロットで必ず実測する)
+## 3. Mayaのシード固定と「ぶれ」について (調査結果)
 
-- Mayaの公開ベンチ (GLM-5.3-Flash): decode 15–150 tok/s, prefill 300–4000 tok/s (構成次第)。
-- 1ケースの出力トークンが仮に5万–15万なら、50 tok/sで 0.3–0.8時間/ケース。
-  最悪 (50万トークンを使い切る) なら約2.8時間/ケース。
-- 主実験 (2 tier × 2 effort × 3 rep × 100ケース = 1200エピソード) は、1台なら**数週間単位**。
-  → **stage 1のパイロット (9 examples) で tokens/case と hours/case を測ってから規模を決める。**
-  足りなければ: (a) Mayaの並列スロット (`--parallel`, GLMは最大8) と `--workers` を合わせる,
-  (b) effort sweep はタスク層化した30ケースに絞る, (c) rep を2に減らしてCIを報告する。
-- **メモリの取り合いに注意:** Mayaは物理RAMをほぼ使い切る (Maya-S 96.5GB, M 116GB, L 156GB をVRAM+RAMで保持)。
+### 3.1 シードの付け方
+- **Responses API (`maya/` が話す口) はリクエストの `seed` を受け付けない** (`unsupported Responses parameter: seed` で400)。
+  `temperature` と `top_p` はリクエストでも送れる。
+- seedは**起動設定 (run config) の `sampling.seed`** で与える。設定はサーバー全体に効き、変えるには再起動が要る。
+  → **1 rep = 1回のMaya起動**、rep k の設定は seed = 1000 + k。
+  `run_matrix.sh` はMayaの `GET /props` からseedを読み、repと合わなければ止まる。
+- 同じseedは毎リクエストに同じように効く。ラウンドごとに会話が違うので、同じ乱数列でも出力は変わる。
+
+### 3.2 量子化はぶれの原因か
+- **量子化そのものは決定的。** 重みは固定されたファイルなので、同じtierなら同じ重みで計算する。
+- tierが違えば別のモデルと考える。**同じseedでもtier間で出力はそろわない**ので、tierの比較はrepの統計で行う。
+- ぶれの本当の原因は2つある。
+  1. **サンプリング** (temperature 1.0)。seedで固定できる。
+  2. **浮動小数点の計算経路の違い**。Mayaはエキスパートを VRAM / RAM / SSD に置き分け、RAMのエキスパートを
+     「CPUで計算する (CPU lane)」か「PCIeでGPUに送って計算する」かを起動時の計測で決める。
+     両者は丸め方が違い (出力差 約2%)、ルーターのtop-8選択がそれを増幅する。
+     Maya自身の測定では、既定設定で再起動すると greedy でも**数十トークンで出力が分かれる** (70組中17組だけ一致)。
+
+### 3.3 再現性を取る設定 (Maya docs/SETTINGS.md「Repeatable answers」より)
+
+| 何が変わるか | 固定方法 |
+|---|---|
+| VRAMのエキスパート枠 (空きVRAMで毎回変わる) | `--expert-cache N` (起動ログの `tiers warm` より少し小さいN) |
+| CPU laneの分担 (起動時の計測) | `MAYA_GLM_PCIE_SHARE` か `MAYA_GLM_CPU_PLAN` |
+| 実行中の再計測 | `MAYA_GLM_CPU_RETIME=0` |
+| 裏でのエキスパート移動 | `MAYA_GLM_PROMOTE=0` |
+| RAM層の大きさ | `MAYA_GLM_RAM_GB` |
+| プロンプト読み込みがキャッシュ状態に依存 | `MAYA_GLM_PREFILL_STABLE=1` (2–5%遅くなる) |
+| **まとめて解決** | `MAYA_GLM_CPU_LANE=0`: 全エキスパートをGPUのカーネルで計算。再起動しても同じトークン。decodeは4–10%遅い |
+
+追加の注意:
+- `--parallel` 2以上 (同時リクエスト) は、バッチ化・プロンプトの分割読みでビット一致しない場合がある。
+  **ビット再現を取るなら `--parallel 1`**。ただしスループットが落ちる。
+- ドラフター (DFlash2 / MTP) を**使うこと自体**はトークンを変えない。ただし**読み込む**とVRAMが減り、エキスパート配置が変わってトークンが変わる。条件をそろえる。
+- 別のビルド・ドライバ・GPUでは、全部固定しても別の (同じくらい妥当な) トークンになる。Maya自身も「1台のPCでの測定、複数GPU・Linux・AMDは未確認」と書いている。
+
+### 3.4 論文での扱い (推奨)
+- 本実験は**3 seed (3回の起動) の平均とばらつき**で報告する。ビット再現を主張の柱にはしない。
+- そのうえで**小さな再現性チェック**を付ける: 6ケース (各タスク1件) を同じseedで2回 (間にMaya再起動)、
+  `--parallel 1` + §3.3の設定で回し、`paper/eval/compare_runs.py` で
+  呼び出しごとの出力トークン数・提出物のハッシュ・スコアが一致するかを見る。
+  一致すれば「この設定なら再現できる」と書け、一致しなければ「どこで分かれたか」を書ける。どちらでも結果になる。
+
+## 4. 計算量 (パイロットで実測してから決める)
+
+- Mayaの公開ベンチ (GLM-5.3-Flash): decode 15–150 tok/s, prefill 300–4000 tok/s。
+- 1ケースの出力が5万–15万トークンなら、50 tok/sで0.3–0.8時間。予算50万を使い切ると約2.8時間。
+- 主実験 = 100ケース × 3 rep = 300エピソード。effort maxは長くなりやすい。**1台で数日〜数週間**の規模。
+- 先に stage 1 (examples 9件) で tokens/case と hours/case を測り、足りなければ
+  (a) `--parallel` と `WORKERS` を上げる (ビット再現は捨て、3 seedの統計で扱う),
+  (b) effortをhighにする,
+  (c) repを2にしてCIを報告する、の順で削る。
+- **メモリ:** MayaはRAMをほぼ使い切る (Maya-S 96.5GB, M 116GB, L 156GB をVRAM+RAMで保持)。
   BenchCADのスコアラーは1プロセス2.5–3.1GB、サンドボックスは1実行2GB。
-  **ハーネス (Docker+スコアラー) は別マシンで動かし、`MAYA_BASE_URL` をLAN越しに向ける**のが安全。
+  **ハーネス (Docker + スコアラー) は別マシンで動かし、`MAYA_BASE_URL` をLAN越しに向けるのが安全。**
 
-## 4. 論文の構成案
+## 5. 論文の構成案
 
-1. **Introduction** — 巨大MoEのローカル実行 (Maya) が実用域に入った。だが量子化の評価は1問1答の指標だけ。
-2. **Background** — BenchCAD 2.1 (6タスク, 幾何スコア), GLM-5.3-Flash (321B/18B active, マルチモーダル, MIT), Maya (エキスパートをGPU/RAM/SSDに配置, Maya quant)。
-3. **Setup** — ハーネスへの `maya/` 追加 (Responses API, 思考の持ち越し, 画像), 計測環境, Publicを使う理由と規約。
-4. **RQ1** 量子化 vs クラウド — タスク別ペア差, CI。
-5. **RQ2** effort / 思考予算。
-6. **RQ3** コスト — 時間・電力・$/case のパレート図。
-7. **RQ4** 失敗分析 — 終了理由の内訳, 文脈要約の発生, 画像の多いタスク (T2/T4/T5) での挙動。
-8. (任意) **RQ5** 合成データでのFT。
-9. **Limitations** — Coreではない (Publicは「reportableではない」), 1台のハードウェア, OpenRouterの提供元の量子化が不明, Mayaのバージョン依存。
-10. **Conclusion**。
+1. Introduction: 巨大MoEのローカル実行が現実的になったが、評価は1問1答の指標が中心
+2. Setup: BenchCAD 2.1 Public, GLM-5.3-Flash, Maya (tier, 設定), ハーネスへの `maya/` 追加, 条件表 (§1)
+3. Results (RQ1): タスク別スコア, n, CI
+4. Failure analysis (RQ2): 終了理由, ラウンド数, トークン数の分布, 画像の多いタスクの挙動
+5. Deployment settings (RQ3) と Cost (RQ4)
+6. Reproducibility: §3の調査と再現性チェックの結果
+7. Limitations: Coreではない, 1台のハードウェア, Mayaのバージョン依存, Publicは公式報告用ではない
+8. (任意) Cloud reference (RQ5)
 
-## 5. 「OpenAI APIで学習」部分: ここまで用意済み (ジョブ作成の直前で止めてある)
+## 6. 実行手順
 
-```
-paper/synth/families.py           8種類のパラメトリック部品 (プレート/フランジ/L金具/段付き軸/ポケット/六角スタンドオフ/Uチャンネル/リブ)
-paper/synth/generate.py           プログラム → STEP → T3と同じ描き方の4面図 (envs/common/bench_views.py)
-paper/train/build_openai_jsonl.py OpenAIのchat FT形式 (system / user+画像 / assistant=```submit```), train/val/ood
-paper/train/contamination.py      BenchCADとの重複検査 (バイト一致・canary/名前・体積+bboxの近似一致)。通らないと次へ進めない
-paper/train/launch_openai_ft.py   既定は dry run。--execute を付けたときだけアップロードとジョブ作成
-```
-
-このコンテナで16サンプルのスモークを通した: 16/16生成成功, 重複検査パス (examples 174ファイル・参照形状7個と照合),
-dry runで「何もアップロードせず、ジョブも作っていない」ことを確認。
-
-評価側も、偽のMayaサーバー (Mayaの `serve/responses.py` と同じSSEの順序) を相手に
-`harness/run.py --model maya/glm-5.3-flash` を examples/task3 で end-to-end に通した:
-提出 → 実スコアラーで採点 (箱の提出で0.20), レコードに `provider: maya`, `effort_sent: high`, ローカル時計の設定が残る。
-**実機のMaya + GLM-5.3-Flashではまだ動かしていない** (このコンテナにGPUがない)。最初の実機確認が stage 1。
-
-**本番の手順 (ここから先はユーザーの判断):**
-
-```bash
-uv run python paper/synth/generate.py --n 2000 --out data/synth_v1 --seed 0
-```
-
-```bash
-uv run python paper/train/build_openai_jsonl.py data/synth_v1 --out data/ft_v1 --holdout-family ribbed_plate
-```
-
-```bash
-uv run python paper/train/contamination.py data/synth_v1 data/ft_v1 --benchcad examples --benchcad ~/.cache/benchcad/benchcad-2.0-public --report data/ft_v1/contamination.json
-```
-
-```bash
-uv run python paper/train/launch_openai_ft.py data/ft_v1 --base-model <画像FT対応のモデルID> --price-per-mtok <その日の単価>
-```
-
-最後のコマンドに `--execute` を付けると学習が始まる (課金が発生する)。
-**画像付きFTに対応しているモデルIDと単価は日々変わるので、実行当日にOpenAIのファインチューニングガイドで確認すること。**
-スクリプトはモデルIDを仮定しない。
-
-FTモデルの評価は、学習後のモデルIDで `--model openai/<ft-model-id>` としてPublicのT1/T3を回す
-(ハーネスはOpenAIのResponses API経由で動く。FTモデルがResponses APIとreasoning設定を受け付けるかは事前に要確認)。
-
-## 6. 実行手順 (評価)
+準備 (ハーネス側のマシン):
 
 ```bash
 uv sync --group harness --group dev
@@ -154,39 +156,78 @@ docker build -t benchcad-sandbox:amd64 sandbox/
 paper/eval/run_matrix.sh 0
 ```
 
-Mayaを起動 (別マシン可) してから:
+Publicの取得 (Hugging Faceで規約に同意し、`HF_TOKEN` を設定。revision `v2.1` に固定):
 
 ```bash
-export MAYA_BASE_URL=http://<maya-host>:8080/v1 MAYA_CONTEXT_TOKENS=262144 TIER=maya-s
+uvx --from huggingface_hub hf download BenchCAD/benchcad-2.0-public --repo-type dataset --revision v2.1 --local-dir ~/.cache/benchcad/benchcad-2.0-public
+```
+
+ハッシュ (MANIFEST.sha256) とスコアラーの確認 (`maya/` はAPIキー不要。Mayaへの呼び出しはしない):
+
+```bash
+tools/run_core.sh --set public --model maya/glm-5.3-flash --effort max --dry-run
+```
+
+rep 0 の設定を作り、Mayaを起動 (Maya側のマシン):
+
+```bash
+uv run python paper/eval/maya_config.py ~/project-maya/maya-glm-maya-s.json --rep 0 --repeatable --parallel 1
 ```
 
 ```bash
-MAYA_DIR=~/project-maya paper/eval/collect_env.sh results/paper/env_maya-s.txt
+./maya.sh --config ~/project-maya/maya-glm-maya-s.eval-r0.json
+```
+
+環境を記録して、パイロット → 本実験 (ハーネス側):
+
+```bash
+export MAYA_BASE_URL=http://<maya-host>:8080/v1 MAYA_CONTEXT_TOKENS=262144 TIER=maya-s REP=0
+```
+
+```bash
+MAYA_CONFIG=~/project-maya/maya-glm-maya-s.eval-r0.json paper/eval/collect_env.sh results/paper/env_maya-s_r0
 ```
 
 ```bash
 paper/eval/run_matrix.sh 1
 ```
 
-Publicを取得 (HFで規約に同意し、`HF_TOKEN` を設定):
+```bash
+paper/eval/run_matrix.sh main
+```
+
+rep 1, 2 は `--rep 1` / `--rep 2` で設定を作り直し、Mayaを再起動し、`REP=1` / `REP=2` で同じことを繰り返す。
+
+再現性チェック (同じseedで2回、間に再起動):
 
 ```bash
-tools/run_core.sh --set public --dry-run
+RUN=a paper/eval/run_matrix.sh repeat
 ```
 
 ```bash
-paper/eval/run_matrix.sh 2
+RUN=b paper/eval/run_matrix.sh repeat
 ```
 
 ```bash
-OPENROUTER_API_KEY=... paper/eval/run_matrix.sh 2ref
+uv run python paper/eval/compare_runs.py results/paper/repeat_maya-s_max_a.json results/paper/repeat_maya-s_max_b.json
 ```
 
-## 7. 既知のリスクと未確認事項
+集計:
 
-- **OpenRouterの提供元:** `z-ai/glm-5.3-flash` はプロバイダ間でルーティングされ、提供元の量子化が分からないことがある。
-  ハーネスには提供元を固定する機能がないので、固定するなら追加実装が必要 (OpenRouterの `provider.order`)。
-- **画像の扱い:** GLMのビジョンタワーは448px・patch14。ハーネスは1辺最大2000pxで送る。Maya側で何トークンになるかはパイロットで測る (T2/T4/T5は1ラウンド12–20枚)。
-- **Mayaの `thinking_budget`:** 既定32768で思考を打ち切る。クラウド版と条件が揃わないので、揃えるか差を明記する。
-- **BenchCADのライセンス:** このリポジトリにはLICENSEファイルがない。ハーネスへの改変 (`maya/`) を論文で配布するなら、BenchCADチームに確認するか、upstreamへPRで出すのが筋。
-- **Strata:** 今回は対象外。Mayaは「Strata (llama.cppのハイブリッドfork) のfork」なので、比較を足すなら後から同じ `openai_responses_call` 経路で足せる。
+```bash
+uv run python tools/summarize.py results/paper/main_*.json
+```
+
+## 7. このブランチで済んでいること / いないこと
+
+済み:
+- `harness/run.py` に `maya/` プロバイダ (Responses API, 思考の持ち越し, 画像, ローカル用の待ち時間設定をレコードに記録)。
+  追加テスト4件 + ハーネス関連の既存テスト143件が通過。
+- Mayaと同じ形式のSSEを返す偽サーバー相手に、examples/task3で提出 → 実スコアラー採点まで通した。
+- `paper/eval/`: 設定ファイル生成 (`maya_config.py`), 実行 (`run_matrix.sh`), 環境記録 (`collect_env.sh`), 再現性比較 (`compare_runs.py`)。
+
+未確認 (実機が必要):
+- **実機のMaya + GLM-5.3-Flashでは未実行** (このコンテナにGPUがない)。最初の確認は stage 1。
+- Mayaの `/props` の応答形式 (seedの読み取り位置) はソースから読んだもので、実機では未確認。
+- 画像1枚がMaya側で何トークンになるか、T2/T4/T5がコンテキストに収まるか。
+- このリポジトリにLICENSEファイルがない。改変したハーネスを公開するならBenchCADチームに確認する。
